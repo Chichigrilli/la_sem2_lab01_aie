@@ -1,0 +1,147 @@
+name: Autograding
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check tests readiness
+        run: |
+          if [[ "${{ secrets.TESTS_READY }}" != "1" ]]; then
+            echo "::error::Тесты ещё не готовы. Попробуйте после объявления от @raindmitriy"
+            exit 1
+          fi
+          echo "Тесты доступны"
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Checkout student code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: student
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Checkout reference
+        uses: actions/checkout@v4
+        with:
+          repository: RainDmitriy/AIE_tensor_lab
+          ref: main
+          token: ${{ secrets.REFERENCE_TOKEN }}
+          path: reference
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Assemble sandbox
+        run: |
+          set -euo pipefail
+
+          mkdir sandbox
+
+          rsync -a --exclude='.git' --exclude='.github' student/ sandbox/
+
+          find sandbox/ -name "*.pyc" -type f -delete
+          find sandbox/ -name "__pycache__" -type d -exec rm -rf {} +
+
+          if [[ -e sandbox/reference ]]; then
+            echo "::error::Папка 'reference' в решении зарезервирована системой тестирования"
+            exit 1
+          fi
+
+          rsync -a --exclude='.git' reference/ sandbox/reference/
+          python -m compileall -b sandbox/reference/
+          find sandbox/reference/ -name "*.py" -type f -delete
+          find sandbox/ -name '.git' -prune -exec rm -rf {} +
+
+          echo "Песочница собрана"
+          echo "Структура:"
+          find sandbox/ -type f | head -50
+
+      - name: Upload sandbox
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox
+          path: sandbox
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+
+    steps:
+      - name: Download sandbox
+        uses: actions/download-artifact@v4
+        with:
+          name: sandbox
+          path: sandbox
+
+      - name: Run tests (Isolated Docker, No Network)
+        run: |
+          set -euo pipefail
+
+          IMAGE="python:3.10-slim"
+          docker pull "$IMAGE" >/dev/null
+
+          echo "═══════════════════════════════════════════════════"
+          echo "  Запуск тестов в изолированном контейнере"
+          echo "  Docker image : $IMAGE"
+          echo "  Network      : none"
+          echo "═══════════════════════════════════════════════════"
+
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 256 \
+            --memory 512m \
+            --cpus 1.0 \
+            --user 65534:65534 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --mount type=bind,src="${GITHUB_WORKSPACE}/sandbox",dst=/workspace,readonly \
+            --workdir /workspace \
+            -e HOME=/tmp \
+            -e PYTHONHASHSEED=0 \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            "$IMAGE" \
+            python -B -E -c "
+          import subprocess, sys
+
+          tests = [
+              'reference.tests.test_summary'
+          ]
+
+          failed = 0
+          for t in tests:
+              print(f'\n{\"=\"*60}')
+              print(f'  Запуск: {t}')
+              print(f'{\"=\"*60}\n', flush=True)
+              rc = subprocess.call([sys.executable, '-B', '-E', '-m', t])
+              if rc != 0:
+                  failed += 1
+
+          print(f'  Результат: {len(tests) - failed}/{len(tests)} модулей пройдено')
+
+          sys.exit(1 if failed else 0)
+          "
