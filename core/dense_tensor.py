@@ -126,17 +126,18 @@ class DenseTensor:
         Args:
             nested: список
         """
-        def get_shape(lst: list) -> tuple[int, ...]:
-            if not isinstance(lst, list):
+
+        def get_shape(lst) -> tuple[int, ...]:
+            if not isinstance(lst, (list, tuple)):
                 return ()
             if len(lst) == 0:
                 return (0,)
             return (len(lst),) + get_shape(lst[0])
-        
-        def flatten(lst: list) -> list[float]:
+
+        def flatten(lst) -> list[float]:
             result = []
             for item in lst:
-                if isinstance(item, list):
+                if isinstance(item, (list, tuple)):
                     result.extend(flatten(item))
                 else:
                     result.append(float(item))
